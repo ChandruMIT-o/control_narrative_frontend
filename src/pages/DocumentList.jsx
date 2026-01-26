@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Link } from "react-router-dom";
-import { getDocuments, deleteDocument, getDocumentStatus } from "../api/documents"; // Added getDocumentStatus
+import { getDocuments, deleteDocument, getDocumentStatus } from "../api/documents";
 import Sidebar from "../components/Sidebar";
 import { FileText, Calendar, Eye, Trash2, Loader2, FileCode } from "lucide-react";
 
@@ -10,24 +10,74 @@ export default function DocumentList() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
 
+  // Helper: Check if status is final (no need to poll)
+  const isFinalStatus = (status) => {
+    const s = status?.toLowerCase() || "";
+    return s.includes("completed") || s.includes("ready") || s.includes("failed") || s.includes("error");
+  };
+
   useEffect(() => {
     fetchDocs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
+  // POLL LOGIC: Run every 5 seconds ONLY if there are active documents
+  useEffect(() => {
+    // 1. Identify documents that are still processing
+    const activeDocs = documents.filter(doc => !isFinalStatus(doc.status));
+
+    // If no active documents, do nothing (stops the polling loop)
+    if (activeDocs.length === 0) return;
+
+    const timer = setTimeout(async () => {
+      // 2. Fetch status ONLY for active documents
+      const updates = await Promise.all(
+        activeDocs.map(async (doc) => {
+          try {
+            const res = await getDocumentStatus(doc._id);
+            return { id: doc._id, ...res.data };
+          } catch (err) {
+            return null;
+          }
+        })
+      );
+
+      // 3. Update state only if we got valid updates
+      setDocuments(prevDocs => 
+        prevDocs.map(doc => {
+          const update = updates.find(u => u?.id === doc._id);
+          if (update) {
+            // Merge new status/stage into existing doc
+            return { ...doc, status: update.status, stage: update.stage };
+          }
+          return doc;
+        })
+      );
+    }, 5000); // Wait 5 seconds
+
+    // Cleanup timeout on unmount or if documents state changes (reset timer)
+    return () => clearTimeout(timer);
+  }, [documents]);
+
   const fetchDocs = async () => {
     try {
       setLoading(true);
       
-      // 1. Fetch the basic list (metadata)
+      // 1. Fetch the basic list
       const res = await getDocuments(page);
       const basicDocs = res.data.documents || [];
       setTotalPages(res.data.total_pages || 1);
 
-      // 2. Fetch status for each document in parallel
-      // This matches the logic we fixed in Home.jsx
-      const detailedDocs = await Promise.all(
+      // 2. Initial Status Check (Optimized)
+      // Only fetch details for docs that look like they are processing or have unknown status
+      const mergedDocs = await Promise.all(
         basicDocs.map(async (doc) => {
+          // If the list endpoint already says it's done, skip the extra call
+          if (isFinalStatus(doc.status)) {
+            return doc;
+          }
+
+          // Otherwise, fetch the latest status immediately (so user doesn't wait 5s for first update)
           try {
             const statusRes = await getDocumentStatus(doc._id);
             return {
@@ -42,7 +92,7 @@ export default function DocumentList() {
         })
       );
 
-      setDocuments(detailedDocs);
+      setDocuments(mergedDocs);
     } catch (error) {
       console.error("Error fetching docs", error);
     } finally {
@@ -55,7 +105,6 @@ export default function DocumentList() {
     if (!window.confirm("Are you sure you want to delete this document?")) return;
     try {
       await deleteDocument(id);
-      // If we are on the last page and delete the last item, go back a page
       if (documents.length === 1 && page > 1) {
         setPage(p => p - 1);
       } else {
@@ -66,25 +115,20 @@ export default function DocumentList() {
     }
   };
 
-  // Helper to format date handling MongoDB specific { $date: ... } structure
   const formatDate = (dateInput) => {
     if (!dateInput) return "Unknown date";
-    
-    // Handle MongoDB extended JSON format or standard string
     const dateStr = dateInput?.$date || dateInput;
-    
     return new Date(dateStr).toLocaleDateString("en-US", {
       year: 'numeric', month: 'short', day: 'numeric',
       hour: '2-digit', minute: '2-digit'
     });
   };
 
-  // Helper for status colors
   const getStatusColor = (status) => {
     const s = status?.toLowerCase() || "";
     if (s.includes("ready") || s.includes("completed")) return "bg-green-100 text-green-700 border-green-200";
     if (s.includes("error") || s.includes("failed")) return "bg-red-100 text-red-700 border-red-200";
-    return "bg-blue-50 text-blue-600 border-blue-100"; // Default processing state
+    return "bg-blue-50 text-blue-600 border-blue-100";
   };
 
   return (
@@ -92,7 +136,7 @@ export default function DocumentList() {
       <Sidebar />
       <div className="flex-1 p-8 overflow-y-auto">
         <div className="max-w-7xl mx-auto space-y-6">
-           
+            
           <div>
             <h1 className="text-3xl font-bold text-gray-900">My Documents</h1>
             <p className="text-gray-500 mt-1">View and manage your processed control narratives.</p>
@@ -117,7 +161,6 @@ export default function DocumentList() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {documents.map((doc) => (
                 <div key={doc._id} className="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow flex flex-col overflow-hidden group">
-                  {/* Card Header / Icon */}
                   <div className="p-6 pb-4 flex items-start justify-between">
                     <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center">
                       <FileCode size={24} />
@@ -129,19 +172,16 @@ export default function DocumentList() {
                     </div>
                   </div>
 
-                  {/* Card Body */}
                   <div className="px-6 flex-1">
                     <h3 className="font-semibold text-gray-900 truncate" title={doc.filename}>
                       {doc.filename}
                     </h3>
                     <div className="flex items-center text-gray-500 text-sm mt-2 gap-2">
                       <Calendar size={14} />
-                      {/* Handles both `uploaded_at` (mongo) and `created_at` (generic) */}
                       <span>{formatDate(doc.uploaded_at || doc.created_at)}</span>
                     </div>
                   </div>
 
-                  {/* Card Footer */}
                   <div className="p-6 pt-4 mt-2 flex items-center gap-3 border-t border-gray-50">
                     <Link 
                       to={`/documents/${doc._id}`}
@@ -162,27 +202,25 @@ export default function DocumentList() {
             </div>
           )}
 
-            {/* Pagination - Only shown if more than 1 page exists */}
-            {documents.length > 0 && totalPages > 1 && (
-              <div className="flex justify-center gap-4 mt-8">
-                <button 
-                  disabled={page === 1} 
-                  onClick={() => setPage(p => p - 1)} 
-                  className="px-4 py-2 border rounded-md disabled:opacity-50 hover:bg-white bg-gray-50 text-sm font-medium"
-                >
-                  Previous
-                </button>
-                <span className="py-2 text-sm text-gray-600">Page {page} of {totalPages}</span>
-                <button 
-                  disabled={page === totalPages} 
-                  onClick={() => setPage(p => p + 1)} 
-                  className="px-4 py-2 border rounded-md disabled:opacity-50 hover:bg-white bg-gray-50 text-sm font-medium"
-                >
-                  Next
-                </button>
-              </div>
-            )}
-
+          {documents.length > 0 && totalPages > 1 && (
+            <div className="flex justify-center gap-4 mt-8">
+              <button 
+                disabled={page === 1} 
+                onClick={() => setPage(p => p - 1)} 
+                className="px-4 py-2 border rounded-md disabled:opacity-50 hover:bg-white bg-gray-50 text-sm font-medium"
+              >
+                Previous
+              </button>
+              <span className="py-2 text-sm text-gray-600">Page {page} of {totalPages}</span>
+              <button 
+                disabled={page === totalPages} 
+                onClick={() => setPage(p => p + 1)} 
+                className="px-4 py-2 border rounded-md disabled:opacity-50 hover:bg-white bg-gray-50 text-sm font-medium"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

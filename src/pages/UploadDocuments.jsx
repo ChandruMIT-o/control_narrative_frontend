@@ -20,15 +20,17 @@ export default function UploadDocument() {
   const navigate = useNavigate();
   
   const activePolls = useRef(new Set());
-
-  // Matches the length of STATUS_ORDER in backend
   const DEFAULT_TOTAL_STAGES = 16; 
 
-  // Fallback formatter if backend message is missing
   const prettyStatusText = (status) => {
     if (!status) return "Initializing...";
-    const s = status.replace(/_/g, " "); // Convert snake_case to spaces
+    const s = status.replace(/_/g, " "); 
     return s.charAt(0).toUpperCase() + s.slice(1);
+  };
+
+  const isFinalStatus = (status) => {
+    const s = status?.toLowerCase() || "";
+    return s === "completed" || s.includes("failed") || s.includes("error");
   };
 
   useEffect(() => {
@@ -42,9 +44,13 @@ export default function UploadDocument() {
       setDocuments(docs);
       setTotalPages(res.data.total_pages || 1);
 
+      // Check current statuses and start polling if needed
       docs.forEach(doc => {
-        const currentStatus = progressMap[doc._id]?.status;
-        if (currentStatus !== 'completed' && currentStatus !== 'failed') {
+        // We check the map first to see if we already know it's done
+        // We also check the newly fetched doc.status to avoid starting a poll for a finished doc
+        const knownStatus = progressMap[doc._id]?.status || doc.status;
+        
+        if (!isFinalStatus(knownStatus)) {
           pollStatus(doc._id);
         }
       });
@@ -54,6 +60,7 @@ export default function UploadDocument() {
   };
 
   const pollStatus = async (documentId) => {
+    // Prevent double polling for same ID
     if (activePolls.current.has(documentId)) return;
     activePolls.current.add(documentId);
 
@@ -61,14 +68,10 @@ export default function UploadDocument() {
       try {
         const res = await getDocumentStatus(documentId);
         
-        // Destructure response
         const { status, stage, progress, total_stages } = res.data;
         const total = total_stages || DEFAULT_TOTAL_STAGES;
-
-        // 1. Get exact message from backend 'progress.message' if available
         const message = progress?.message || prettyStatusText(status);
 
-        // 2. Calculate percentage
         let percent = 0;
         if (stage && total) {
             percent = Math.round((stage / total) * 100);
@@ -85,17 +88,20 @@ export default function UploadDocument() {
           },
         }));
 
-        const isFinal = status === "completed" || status === "failed" || status.includes("error");
+        const isFinal = isFinalStatus(status);
         
         if (!isFinal) {
-          setTimeout(check, 1500); 
+          // Changed from 1500 to 5000 (5 seconds)
+          setTimeout(check, 5000); 
         } else {
           activePolls.current.delete(documentId);
+          // If completed, refresh the list to ensure metadata is synced
           if (status === "completed") fetchDocuments(page); 
         }
       } catch (error) {
         console.error(`Error checking status for ${documentId}`, error);
-        activePolls.current.delete(documentId);
+        // On error, wait 5s then retry (or you could abort)
+        setTimeout(check, 5000);
       }
     };
 
@@ -172,6 +178,18 @@ export default function UploadDocument() {
     const info = progressMap[docId];
 
     if (!info) {
+      // If no progress info but doc exists, try to show doc.status if available in parent
+      const doc = documents.find(d => d._id === docId);
+      if (doc && isFinalStatus(doc.status)) {
+         // It's done, just waiting for poll update or map sync
+         return (
+            <div className={`flex items-center gap-1.5 text-xs font-medium ${doc.status === 'completed' ? 'text-green-600' : 'text-red-600'}`}>
+                {doc.status === 'completed' ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
+                <span>{prettyStatusText(doc.status)}</span>
+            </div>
+         );
+      }
+
       return (
         <div className="flex items-center gap-1.5 text-gray-400 text-xs">
           <Loader2 size={12} className="animate-spin" />
@@ -181,17 +199,13 @@ export default function UploadDocument() {
     }
 
     const s = (info.status || "").toLowerCase();
-    const msg = (info.message || "").toLowerCase();
-
-    // Check if status is completed OR if the specific message indicates completion
-    const isReady = s === "completed" || msg === "document processing completed";
+    const isReady = s === "completed";
     const isFailed = s.includes("fail") || s.includes("error");
 
     if (isReady) {
       return (
         <div className="flex items-center gap-1.5 text-green-600 text-xs font-medium">
           <CheckCircle size={12} />
-          {/* Display the actual message or default to 'Completed' */}
           <span>{info.message || "Completed"}</span>
         </div>
       );
@@ -206,7 +220,6 @@ export default function UploadDocument() {
       );
     }
 
-    // PROCESSING STATE
     return (
       <div className="flex items-start gap-2 text-blue-600 text-xs font-medium">
         <Loader2 size={12} className="animate-spin shrink-0 mt-0.5" />

@@ -68,27 +68,30 @@ export default function ChatPage() {
     }
   };
 
-  const handleLoadChat = async (id) => {
+const handleLoadChat = async (id) => {
      try {
          setChatId(id);
          const res = await getChatMessages(id);
          
          const loadedMessages = res.data.map(m => ({
              ...m,
+             // CRITICAL FIX: Ensure 'id' exists by falling back to '_id'
+             id: m.id || m._id, 
              text: m.content,
-             // Map backend fields to frontend UI expected fields if they exist
              citations: m.citations || [],
-             // We can mock metadata for old chats or if backend saved it, load it
              docCount: m.document_ids?.length || 0,
-             mode: "RAG" // or fetch from backend if saved per message
+             mode: m.mode || "RAG" // Load mode from history if available
          }));
          setMessages(loadedMessages);
+         
+         // Clear context when loading a new chat to prevent mixing
+         setSelectedContextIds(new Set());
      } catch (e) {
          console.error("Failed to load chat history", e);
      }
   };
 
-  const handleSend = async (text) => {
+ const handleSend = async (text) => {
     if (!text.trim()) return;
     
     let currentChatId = chatId;
@@ -100,6 +103,7 @@ export default function ChatPage() {
                 mode, 
                 document_ids: Array.from(selectedDocs) 
             });
+            // Ensure we grab the ID correctly
             currentChatId = res.data._id || res.data.id; 
             setChatId(currentChatId);
             setChats(prev => [res.data, ...prev]);
@@ -108,18 +112,19 @@ export default function ChatPage() {
             return;
         }
     }
-
-    const userMsg = { id: Math.random().toString(36).slice(2), role: 'user', text };
+const userMsg = { id: Math.random().toString(36).slice(2), role: 'user', text };
     setMessages(prev => [...prev, userMsg]);
     setIsTyping(true);
 
     try {
+      // CRITICAL FIX: Filter out null/undefined values from context IDs
+      const safeContextIds = Array.from(selectedContextIds).filter(id => id);
+
       const payload = {
         message: text,
         mode,
         document_ids: Array.from(selectedDocs),
-        active_context_ids: Array.from(selectedContextIds),
-        // Pass artifacts if your backend logic uses them (optional for now)
+        active_context_ids: safeContextIds, // Send clean list
         artifacts: Array.from(selectedArtifacts) 
       };
 
@@ -129,12 +134,11 @@ export default function ChatPage() {
           id: res.data._id || Math.random().toString(36).slice(2), 
           role: 'assistant', 
           text: res.data.content || 'Response...',
-          // Attach Metadata for UI Display
           mode: mode,
           docCount: selectedDocs.size,
-          ctxCount: selectedContextIds.size,
-          artifacts: Array.from(selectedArtifacts), // Store what user selected
-          citations: res.data.citations || [] // Store actual retrieved chunks
+          ctxCount: safeContextIds.length,
+          artifacts: Array.from(selectedArtifacts),
+          citations: res.data.citations || []
       };
 
       setMessages(prev => [...prev, assistant]);
